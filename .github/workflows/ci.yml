@@ -1,0 +1,84 @@
+# 合约测试 + 地址一致性。
+#
+# 为什么要有这个:README 里写着「98 个测试全绿」「费率 immutable、无 setter」,
+# 这些话只有能被外人自己验证才算数。CI 把它从「我们说的」变成「GitHub 说的」。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 合约测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      # forge-std 钉死版本。不钉的话上游改一行,这里就莫名其妙地红。
+      - name: 装 forge-std v1.17.0
+        working-directory: contracts
+        run: forge install foundry-rs/forge-std@v1.17.0 --no-git
+
+      - name: 编译
+        working-directory: contracts
+        run: forge build --sizes
+
+      - name: 跑测试
+        working-directory: contracts
+        run: forge test -vv --summary
+
+      # 测试数只增不减。有人删了测试让 CI 变绿,这一步会抓到。
+      - name: 测试数不少于 98
+        working-directory: contracts
+        run: |
+          n=$(forge test --list --json | python3 -c 'import json,sys; print(sum(len(v) for f in json.load(sys.stdin).values() for v in f.values()))')
+          echo "测试数 $n"
+          [ "$n" -ge 98 ] || { echo "::error::测试少了:$n < 98"; exit 1; }
+
+  addresses:
+    name: 地址一致性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # README 里写的地址和 addresses.json 必须一字不差。
+      # 之前真出过事:skill 里带着已作废的工厂地址,用户照着打过去。
+      - name: README 的地址 ↔ addresses.json
+        run: |
+          python3 - <<'PY'
+          import json, re, sys, pathlib
+
+          a = json.loads(pathlib.Path('deploy/addresses.json').read_text())
+          readme = pathlib.Path('README.md').read_text()
+
+          want = {
+              'factory':        a['contracts']['factory']['address'],
+              'implementation': a['contracts']['implementation']['address'],
+              'entryPoint':     a['contracts']['entryPoint']['address'],
+              'feeTo':          a['fees']['feeTo'],
+          }
+
+          bad = [f'{k} {v} 不在 README 里' for k, v in want.items() if v not in readme]
+
+          # README 不该出现 addresses.json 里没有的 0x 地址 —— 那多半是过时的
+          known = {v.lower() for v in want.values()}
+          known |= {a['assets']['USDT']['address'].lower(),
+                    a['deployer']['address'].lower(),
+                    a['aster']['builder'].lower(),
+                    a['aster']['depositBridge'].lower()}
+          for m in set(re.findall(r'0x[a-fA-F0-9]{40}', readme)):
+              if m.lower() not in known:
+                  bad.append(f'README 有个 addresses.json 里没有的地址:{m}')
+
+          if bad:
+              for b in bad: print(f'::error::{b}')
+              sys.exit(1)
+          print(f'✓ {len(want)} 个地址对上了')
+          PY

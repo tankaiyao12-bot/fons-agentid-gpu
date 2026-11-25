@@ -11,13 +11,26 @@ GPU 的本事不是单核更快，是通道多、互不阻塞、各自失败。�
 
 > 说明：链上**执行**仍然是串行的，这套东西不加快单笔交易。它消掉的是**队头阻塞和故障连带**。
 
-## 设计文档（唯一事实来源）
+## 上线地址（BNB Chain，chainId 56）
 
-| 文档 | 用途 |
+下面这些是**正在跑的那一套**。README 里所有关于权限的话，都可以拿这几个地址去链上核。
+
+| | 地址 |
 | --- | --- |
-| [交给 Design 的基线](https://claude.ai/artifact/SoAS3e8Rpd3YGpQqgMqqX2) | 前端 UI 基线 |
-| [AgentAccount 设计稿](https://claude.ai/artifact/TfyXvDF7ARj2krV33U9icp) | 合约 + 调度器工程稿 |
-| [并行账户研究报告](https://claude.ai/artifact/EjEx3y3WxG2jAZr3A1rkP3) | 市场调研与定案依据 |
+| EntryPoint | [`0x0000000071727De22E5E9d8BAf0edAc6f37da032`](https://bscscan.com/address/0x0000000071727De22E5E9d8BAf0edAc6f37da032) |
+| 工厂 | [`0x10B6A79B36C7Bb16Aa36E5FCb108Ebe142C832D1`](https://bscscan.com/address/0x10B6A79B36C7Bb16Aa36E5FCb108Ebe142C832D1) |
+| 账户实现 | [`0xec02dE9a29e2e276FdbeA7c61c569Fe14618bD79`](https://bscscan.com/address/0xec02dE9a29e2e276FdbeA7c61c569Fe14618bD79) |
+| 收费地址 | [`0x978cC152DfeC8064eC7d5097F138679a46bfBde8`](https://bscscan.com/address/0x978cC152DfeC8064eC7d5097F138679a46bfBde8) |
+
+每个账户是一个 EIP-1167 代理，**实现地址焊死在字节码里，不可升级**。
+费率三个字段 `immutable`、无 setter、构造函数硬顶 2% —— 要改只能部署新工厂，
+而新工厂是另一个地址，老账户不受影响。
+
+`deploy/addresses.json` 是这些地址的唯一来源，CI 会核它和本文一致。
+
+> **前六版已作废**，作废原因逐条写在 `deploy/addresses.json` 的 `note` 里，
+> 包括 v4 那个真实的出口检查缺陷（agent 能把买到的币发给任意地址，附主网实测 tx）。
+> 我们把它写出来，因为「这套东西没人能偷偷改」这句话，只有连自己的旧洞都摊开才站得住。
 
 ## 目录
 
