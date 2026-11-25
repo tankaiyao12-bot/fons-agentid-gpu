@@ -1,0 +1,15 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 400
+via_ir = true
+remappings = ["forge-std/=lib/forge-std/src/"]
+
+[fmt]
+line_length = 120

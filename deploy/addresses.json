@@ -1,0 +1,51 @@
+{
+  "_comment": "链上常量的唯一来源。build_skills.py 把它注进两份地图的 <!-- fons:addr --> 之间。部署 = 改这个文件 + 重跑 build,不碰 skill 正文。",
+  "chain": {
+    "name": "BNB Chain",
+    "chainId": 56,
+    "explorer": "https://bscscan.com",
+    "rpc": "https://bsc-rpc.publicnode.com"
+  },
+  "contracts": {
+    "entryPoint": {
+      "address": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+      "note": "ERC-4337 v0.7 官方 EntryPoint。2026-11-22 链上核过:主网(56)与测试网(97)字节码完全一致(32072 字符,确定性部署);getUserOpHash 的结果和 userop.mjs 本地算的一字不差。"
+    },
+    "factory": {
+      "address": "0x10B6A79B36C7Bb16Aa36E5FCb108Ebe142C832D1",
+      "note": "AgentAccountFactory（第五版，2026-11-24，tx 0xf92006e0…161c）。前四版全部作废：v1 0x8aFaF9… sweep 走不了车道；v2 0x5eD8b4… 缺 cancelBatch；v3 0xcebCef… 缺 sellInto 和 withdrawNative；v4 0x91b867… 缺出口检查 —— agent 能把买到的币直接发给任意地址（主网实测 tx 0xe7c8224b…bf00：账户 USDT −0.1、账户 WBNB +0、黑洞地址 +0.000177）。**这一版不含任何收费机制**，费率等 owner 定了再部下一版。部署块 135339217 —— 网页索引事件从这里起扫。⚠️ 公共节点 getLogs 上限 50000 块且不支持归档，分片用 9000、并行 6 路。",
+      "block": 135339217
+    },
+    "implementation": {
+      "address": "0xec02dE9a29e2e276FdbeA7c61c569Fe14618bD79",
+      "note": "AgentAccount 实现（第七版）。EIP-1167 代理焊死这个地址，**不可升级**。v7 相对 v6 两处：① 交易费**买卖两腿都收**（v6 只收买入腿，主网实测过）；② 手续费**算进票面**——v6 是票面之外另收，导致『票面=全部余额』的票花满会 TransferFailed，而且核心承诺『≤票面的钱会离开账户』不成立（实测 50 的票实际走 50.5）。费率三个字段仍是 immutable，链上读回核对无误，无任何 setter。"
+    },
+    "bundler": {
+      "url": "http://127.0.0.1:4337",
+      "note": "本机测试。上 tw3 之后改成正式地址，发送钥匙在那台机器上重新生成。"
+    }
+  },
+  "assets": {
+    "USDT": {
+      "address": "0x55d398326f99059fF775485246999027B3197955",
+      "note": "BSC USDT。2026-11-22 链上核过:name=Tether USD · symbol=USDT · decimals=18;DOMAIN_SEPARATOR() revert —— 确认没有 EIP-2612 permit,approve 省不掉。脚本仍然现读 decimals,不写死。"
+    }
+  },
+  "deployer": {
+    "address": "0x1c2d3De9d260e6CB78A89085CAb0D90e87F87bC4",
+    "note": "本项目专用部署钥匙，和 A 线费钱包分开。只付 gas，对已部署合约无任何权力。私钥在 ~/.fons/gpu/deploy.key（0600），不进仓库。"
+  },
+  "fees": {
+    "feeTo": "0x978cC152DfeC8064eC7d5097F138679a46bfBde8",
+    "tradeFeeBps": 25,
+    "drawFeeBps": 100,
+    "note": "交易票（requireReturn=true，① Pancake）**买卖各收 0.25%，来回 0.5%**；入金/取用（requireReturn=false 和所有 payout）收 1%。基数是实际净流出，不是票面——没花的钱不收费。**费算进票面**：一张 100 的票，真正能送到市场的是 ~99.01（100/1.01），换来的是『≤票面的钱会离开账户』字面成立。skill 会自动留头寸。三个字段都是 immutable，构造函数硬顶 2%，要改只能部署新工厂。"
+  },
+  "aster": {
+    "builder": "0xd31A32A7A72B88D922369b2E5c7BC021A826962a",
+    "builderName": "fons",
+    "maxFeeRate": "0.001",
+    "depositBridge": "0x128463A60784c4D3f46c23Af3f65Ed859Ba87974",
+    "note": "builder 是**数据管道**不是收费功能：A 形态下平台不持有任何用户钥匙，官网能显示你的 Aster 持仓/成交全靠 Aster 按这个授权把数据交过来。maxFeeRate 是上限（Aster 硬顶 0.001），实际收多少看下单时的 feeRate。depositBridge 已对过官方 Smart Contracts 页。"
+  }
+}
