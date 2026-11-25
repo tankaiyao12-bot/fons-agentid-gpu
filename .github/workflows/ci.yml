@@ -82,3 +82,19 @@ jobs:
               sys.exit(1)
           print(f'✓ {len(want)} 个地址对上了')
           PY
+
+      # README 说「owner 能做什么」。加了 onlyOwner 函数却忘了写进 README，
+      # 等于偷偷扩大 owner 的权力 —— 对非托管产品这是最严重的一类漂移。
+      - name: onlyOwner 函数 ↔ README 权限披露
+        run: |
+          python3 - <<'PY'
+          import re, sys, pathlib
+          src = pathlib.Path('contracts/src/AgentAccount.sol').read_text()
+          readme = pathlib.Path('README.md').read_text()
+          fns = set(re.findall(r'function\s+(\w+)\s*\([^)]*\)[^{]*?onlyOwner', src, re.S))
+          missing = sorted(f for f in fns if f'`{f}`' not in readme)
+          print(f"onlyOwner 函数 {len(fns)} 个：{', '.join(sorted(fns))}")
+          for m in missing:
+              print(f'::error::`{m}` 是 onlyOwner 函数，但 README 的权限披露里没有它')
+          sys.exit(1 if missing else 0)
+          PY

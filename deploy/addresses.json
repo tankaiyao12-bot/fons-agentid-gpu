@@ -14,11 +14,13 @@
     "factory": {
       "address": "0x10B6A79B36C7Bb16Aa36E5FCb108Ebe142C832D1",
       "note": "AgentAccountFactory（第五版，2026-11-24，tx 0xf92006e0…161c）。前四版全部作废：v1 0x8aFaF9… sweep 走不了车道；v2 0x5eD8b4… 缺 cancelBatch；v3 0xcebCef… 缺 sellInto 和 withdrawNative；v4 0x91b867… 缺出口检查 —— agent 能把买到的币直接发给任意地址（主网实测 tx 0xe7c8224b…bf00：账户 USDT −0.1、账户 WBNB +0、黑洞地址 +0.000177）。**这一版不含任何收费机制**，费率等 owner 定了再部下一版。部署块 135339217 —— 网页索引事件从这里起扫。⚠️ 公共节点 getLogs 上限 50000 块且不支持归档，分片用 9000、并行 6 路。",
-      "block": 135339217
+      "block": 135339217,
+      "verified": "2026-11-25 BscScan 已验证（Etherscan API V2，v0.8.26+commit.8a97fa7a，优化 400 轮）"
     },
     "implementation": {
       "address": "0xec02dE9a29e2e276FdbeA7c61c569Fe14618bD79",
-      "note": "AgentAccount 实现（第七版）。EIP-1167 代理焊死这个地址，**不可升级**。v7 相对 v6 两处：① 交易费**买卖两腿都收**（v6 只收买入腿，主网实测过）；② 手续费**算进票面**——v6 是票面之外另收，导致『票面=全部余额』的票花满会 TransferFailed，而且核心承诺『≤票面的钱会离开账户』不成立（实测 50 的票实际走 50.5）。费率三个字段仍是 immutable，链上读回核对无误，无任何 setter。"
+      "note": "AgentAccount 实现（第七版）。EIP-1167 代理焊死这个地址，**不可升级**。v7 相对 v6 两处：① 交易费**买卖两腿都收**（v6 只收买入腿，主网实测过）；② 手续费**算进票面**——v6 是票面之外另收，导致『票面=全部余额』的票花满会 TransferFailed，而且核心承诺『≤票面的钱会离开账户』不成立（实测 50 的票实际走 50.5）。费率三个字段仍是 immutable，链上读回核对无误，无任何 setter。",
+      "verified": "2026-11-25 BscScan 已验证（Etherscan API V2，v0.8.26+commit.8a97fa7a，优化 400 轮）"
     },
     "bundler": {
       "url": "http://127.0.0.1:4337",
