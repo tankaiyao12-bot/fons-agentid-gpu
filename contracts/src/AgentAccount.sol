@@ -84,6 +84,16 @@ contract AgentAccount is IAccount {
     /// 按 epoch 分桶：bumpEpoch 后换新桶，新桶天生为 0，不需要遍历。
     mapping(uint32 => mapping(address => uint256)) public reserved;
 
+    /// 停在 AgentID 钱包上、还没结的钱。按票记，一张票一笔。
+    /// @dev 为什么需要：AgentID 上的 USDT 是一个池子、没有标签，sweep 只会
+    ///      「有多少拉多少」。记下「这张票推了多少还没花完」，回扫时留住这些，
+    ///      剩下的随便拉 —— 这样**不用串行**也不会把别人还要用的钱拉走。
+    ///      v7 之前靠用户脚本里一道「同时只放一轮」的闸，那个会卡住同一轮补仓。
+    mapping(bytes32 => uint256) public parked;
+
+    /// 同上，按资产汇总 —— sweep 是按资产拉的，所以要这个口径。
+    mapping(address => uint256) public parkedAsset;
+
     // ─────────────────────────── 事件 ───────────────────────────
 
     event NoteIssued(
@@ -111,6 +121,12 @@ contract AgentAccount is IAccount {
     event NoteClosed(bytes32 indexed noteId, uint128 released, bytes1 reason); // 'c'ancel / 'r'eclaim
     event EpochBumped(uint32 indexed from, uint32 indexed to);
     event Swept(address indexed asset, address indexed from, uint256 amount);
+
+    /// 往 AgentID 推了一笔，开始计这张票的「还没结」。
+    event Parked(bytes32 indexed noteId, address indexed asset, uint256 amount, uint256 noteTotal);
+
+    /// 这张票这轮结束了，解掉它占的那部分。
+    event Released(bytes32 indexed noteId, address indexed asset, uint256 amount);
     event AgentKeyRotated(address indexed from, address indexed to);
     event OwnerTransferred(address indexed from, address indexed to);
     event Withdrawn(address indexed asset, address indexed to, uint256 amount);
@@ -510,6 +526,16 @@ contract AgentAccount is IAccount {
         n.netOut = uint128(raw);
         reserved[epoch][n.asset] -= (out + fee);
         emit NoteSpent(noteId, to, before, uint128(raw));
+
+        // 钱停在 AgentID 上的，记一笔「还没结」。回扫时留住这些。
+        // 判据就是目的地 —— ③ Predict 和 ⑤ 身份门禁 mint 的票，market 填的
+        // 都是 AgentID 地址；①② 填的是市场合约，不进这里。
+        if (to == agentIdEoa && to != address(0)) {
+            parked[noteId] += out;
+            parkedAsset[n.asset] += out;
+            emit Parked(noteId, n.asset, out, parked[noteId]);
+        }
+
         _pay(n.asset, fee, drawFeeBps);
     }
 
@@ -576,13 +602,64 @@ contract AgentAccount is IAccount {
     /// @dev 必须是「拉」不是「推」：让 EOA 自己发交易就占掉它那条唯一的 nonce 队列。
     ///      前提是 EOA 开户时一次性 approve 给本账户。
     function sweep(address asset, address from) external onlyOperator returns (uint256 amount) {
-        amount = IERC20(asset).balanceOf(from);
-        if (amount == 0) return 0;
-        uint256 allowed = IERC20(asset).allowance(from, address(this));
-        if (allowed < amount) amount = allowed;
+        amount = sweepable(asset, from);
         if (amount == 0) return 0;
         asset.safeTransferFrom(from, address(this), amount);
         emit Swept(asset, from, amount);
+    }
+
+    /// @notice 这一刻能从 `from` 拉回多少 —— 把还没结的那部分留下。
+    /// @dev 三个口径取最小：余额、授权、余额减去该留的。
+    ///      `min(parkedAsset, 余额)` 里的 min 是必须的：AgentID 可能已经把钱花掉
+    ///      一部分了（mint 就是这样），那时候余额比账面少，按账面扣会得负数。
+    ///      ② Aster 的回款不在 parkedAsset 里，所以自动就拉得走 —— 不用特判。
+    function sweepable(address asset, address from) public view returns (uint256) {
+        uint256 bal = IERC20(asset).balanceOf(from);
+        if (bal == 0) return 0;
+
+        if (from == agentIdEoa && from != address(0)) {
+            uint256 owed = parkedAsset[asset];
+            uint256 keep = owed < bal ? owed : bal;
+            bal -= keep;
+            if (bal == 0) return 0;
+        }
+
+        uint256 allowed = IERC20(asset).allowance(from, address(this));
+        return allowed < bal ? allowed : bal;
+    }
+
+    /// @notice 这张票这一轮完了 —— 解掉它占的「还没结」。
+    /// @dev 为什么要显式说一声：钱花掉变成别的币之后（mint 就是），USDT 永远
+    ///      不会原样回来，合约在链上看不见这件事，只能由 agent 来销账。
+    ///      不调的后果只是**少拉一点回来**，钱还在 AgentID 上 —— 不会卡住任何业务。
+    ///      onlyOperator 含 owner，所以 agent 失联时主人自己能解。
+    function release(bytes32 noteId) external onlyOperator returns (uint256 freed) {
+        return _release(noteId);
+    }
+
+    /// @notice 这一轮完了：先解账，再把能拉的拉回来 —— **一笔交易**。
+    /// @dev 为什么合成一个：拆成 release + sweep 两笔就要两条车道、两次 gas，
+    ///      而且中间那一刻「已解账但还没拉回」是个没必要存在的中间态。
+    ///      回扫本来就是调度器排的一笔 UserOp，这里让它一次做完。
+    function releaseAndSweep(bytes32 noteId, address asset, address from)
+        external
+        onlyOperator
+        returns (uint256 amount)
+    {
+        _release(noteId);
+        amount = sweepable(asset, from);
+        if (amount == 0) return 0;
+        asset.safeTransferFrom(from, address(this), amount);
+        emit Swept(asset, from, amount);
+    }
+
+    function _release(bytes32 noteId) internal returns (uint256 freed) {
+        freed = parked[noteId];
+        if (freed == 0) return 0;
+        address asset = notes[noteId].asset;
+        parked[noteId] = 0;
+        parkedAsset[asset] -= freed;
+        emit Released(noteId, asset, freed);
     }
 
     // ───────────────────── ERC-4337 入口 ─────────────────────

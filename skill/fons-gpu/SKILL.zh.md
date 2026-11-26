@@ -40,8 +40,8 @@ chain:
   explorer:       "https://bscscan.com"
 contracts:
   entryPoint:     "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
-  factory:        "0x10B6A79B36C7Bb16Aa36E5FCb108Ebe142C832D1"
-  implementation: "0xec02dE9a29e2e276FdbeA7c61c569Fe14618bD79"
+  factory:        "0xe6906978d1E097d14Bd328E7C9C314d88624a017"
+  implementation: "0x594dd6d1C8b477848cD379FeD6559ddEbA6a39B6"
   bundler:        "http://127.0.0.1:4337"
 assets:
   USDT:           "0x55d398326f99059fF775485246999027B3197955"
@@ -58,7 +58,7 @@ assets:
 categories:
   1_direct:   {例: Pancake,     谁发交易: AgentAccount, 钱在哪: "从不离开账户", 票的 market: "市场合约"}
   2_signed:   {例: Aster,       谁发交易: AgentAccount, 钱在哪: "从不离开账户", 票的 market: "市场合约"}
-  3_custody:  {例: Predict.fun, 谁发交易: AgentAccount, 钱在哪: "结算之前真的放在市场那边", 票的 market: "市场合约"}
+  3_custody:  {例: Predict.fun, 谁发交易: "AgentID 钱包自己", 钱在哪: "下单到结算之间停在 AgentID 钱包上", 票的 market: "AgentID 钱包地址"}
   4_feeder:   {例: Renaiss,     谁发交易: AgentAccount, 钱在哪: "我们只供血到入金口,之后不在我们这边", 票的 market: "入金口"}
   5_identity: {例: "jager 这类 mint", 谁发交易: "AgentID 钱包自己", 钱在哪: "回扫之前停在 AgentID 钱包上", 票的 market: "AgentID 钱包地址"}
 ```
@@ -144,7 +144,7 @@ agentIdEoa:
   - {命令: "node scripts/gpu.mjs decode <code>",                  说明: "把一串接入码拆开看。**别拿通用 base64 解码器看它** —— 里面是地址和签名的原始字节、不是文本，那种工具只会说「无效输入」"}
   - {命令: "node scripts/gpu.mjs classify --market <addr>",       说明: "判型三步里能从链上查的那一部分"}
   - {命令: "node scripts/gpu.mjs spend --note <id> --data <hex>", 说明: "排一轮进队列;--dry 只模拟不发"}
-  - {命令: "node scripts/gpu.mjs identity --note <id> --amount <n>", 说明: "第五类:把额度打到 AgentID 地址,并占住第五类的闸"}
+  - {命令: "node scripts/gpu.mjs identity --note <id> --amount <n>", 说明: "第五类:把额度打到 AgentID 地址。合约按票记账,不挡别的轮次"}
   - {命令: "node scripts/gpu.mjs approve [--asset <addr>] [--amount <n>]",  说明: "让账户能把某个币从 AgentID 拉回来。**按币种、按额度**——默认只授这一轮要拉的那笔,**绝不授无上限**(那是硬红线,而且 BSC 的 USDT 不对 MaxUint256 特判,无限授权本来就是错觉)。开户那次只覆盖 USDT,mint 回来的币要各自再授。**不做这一步 sweep 返回 0 且不报错**"}
   - {命令: "node scripts/gpu.mjs canpull [--asset <addr>]",        说明: "这个币现在能不能拉回账户。mint 完先跑这个，别等 sweep 返回 0 才发现"}
   - {命令: "node scripts/gpu.mjs rekey",                         说明: "查本地 agent 密钥和链上认的那把对不对得上。**发不出去又看不出原因时先跑这个** —— 主人换过密钥的话，旧私钥签的 UserOp 会被判签名无效，bundler 直接拒收且不提示原因"}
@@ -185,7 +185,7 @@ agentIdEoa:
 回扫:
   must_ask: []
   safe_default: {asset: "这一轮花的那张票的计价资产"}
-  platform: ["AgentID 地址上现在有多少", "那笔一次性授权够不够"]
+  platform: ["AgentID 地址上现在有多少", "这一轮授的额度够不够（按轮授,不是一劳永逸）"]
   never_infer:
     - "AgentID 地址上的 BNB 合约拉不回来(sweep 走的是 ERC-20 的 transferFrom)。如实说;主人不要求就不要让 AgentID 自己推一笔"
 ```
@@ -198,7 +198,7 @@ agentIdEoa:
   金额    [缺,请告诉我这一笔花多少]
   这张票  #3 · 还能花 400 USDT       ← 平台算的
   收款    你的 AgentID 地址           ← 平台算的
-  排队    前面没有别的身份类          ← 平台算的
+  说明    这一轮不用等别的,直接发      ← 平台算的
 钱会先到你的 AgentID 地址,那段时间票据的「最多亏 400」保证不作数 —— mint 完我会立刻拉回来。
 回「发」我就执行。
 ```
@@ -259,6 +259,39 @@ gpu.mjs spend --note <id> --data <hex>
 
 **④ 供血类**:我们送到入金口就停。状态写「已送到入金口 · 之后不在我们这边」。**绝不暗示我们能把它要回来。**
 
+## ① Pancake —— 票会自己回血（2026-11-25 主网真钱验过）
+
+**①和②⑤最大的区别：票花完卖回来，额度自己回来，不用重开。**
+
+```
+买入前   netOut 0           票面剩 1.0
+买入     spend → swapExactTokensForTokens(0.5 USDT → WBNB)
+买入后   netOut 0.50125     票面剩 0.49875     ← 0.5 本金 + 0.00125 交易费(25 bps)
+卖回     sellInto(同一张票, WBNB, 全部)
+卖回后   netOut 0.004356    票面剩 **0.99564**  ← **自己回来了**
+```
+
+剩下那 0.004356 是两腿的滑点 —— 买出去 0.50125，卖回来 0.496894。
+
+**为什么只有 ① 行**：
+
+```
+_spend 给票回血的条件 = 同一笔交易里 note.asset 余额不降反升
+① Pancake   账户里留下代币 → sellInto 卖回 note.asset → **回血**
+② Aster     钱在 Aster 链下账本，账户里什么都没留下 → 没东西可卖 → 不回血
+⑤ mint      币在 AgentID 上，而且票的 market 是个钱包不是市场 → 不能在那儿 swap
+            （要先 sweep 回账户，再换一张 Pancake 票卖 —— 常驻 1 wei 票就是干这个的）
+```
+
+❗ 这条决定了**票该开多大**：① 的票可以开一张长期用，②⑤ 的票要按轮开、开小额。
+
+### 命令参数（容易记错）
+
+```
+spend --out <买回来的币> --min <最小单位数量>    requireReturn=true 的票必须给
+sell  --amount <人类单位>                        不是最小单位
+```
+
 ## ② Aster —— 实测结论（2026-11-24 主网真钱走通）
 
 **它的形状和 ⑤ 一样,不是 ①。** 账户只是付款人,账是挂在 EOA 名下的。
@@ -269,8 +302,10 @@ gpu.mjs spend --note <id> --data <hex>
         # 付钱的是 msg.sender（我们的账户），记账的是 account 参数（EOA）
         # 链上 trace 验过：两者独立，**EOA 全程不发交易**
 谁下单: "EOA 授权的 API 钱包（可以是我们的 agentKey），走 Aster 的 REST API"
-怎么出来: "**只能在 asterdex.com 的网页上提现**，没有链上提现函数，
-          存款桥合约只进不出（探过全部 withdraw 变体，一个都没有）"
+怎么出来: "REST：POST /fapi/v3/aster/user-withdraw（`aster-withdraw` 命令，11-24 真钱走通）。
+          **没有链上提现函数** —— 存款桥合约只进不出（探过全部 withdraw 变体，一个都没有）。
+          ❗ 2026-11-25 之前这里写的是「只能在 asterdex.com 网页上提现」，那是发现 REST
+          之前的话，已作废"
 ```
 
 **票只管到入金口。** 钱进了 Aster 的账本就不在我们这边了，`sweep` 够不着 ——
@@ -416,6 +451,25 @@ Ip not in whitelist   ← 第一次提会撞这个
 
 我们注册 agent 时默认 `canWithdraw=false`、白名单空 —— **这是对的，不该常开**。
 `aster-withdraw` 命令的做法：开 → 提 → `finally` 里关回去，不管成不成。
+
+### ❗ receiver 必须是注册地址 —— 2026-11-25 三组对照实测
+
+想省掉「提到 AgentID 再 sweep」这两跳，直接提进合约账户。**走不通。**
+
+```
+receiver = 合约账户 0x99031D27…   拒  -1000 This address is currently not supported
+receiver = owner 的 MetaMask      拒  -1000  ← **普通 EOA 也拒**
+receiver = AgentID（注册地址）     ✓  受理 withdrawId 1177999941160869888
+```
+
+**第二组是关键**：普通 EOA 也被拒，所以不是「合约地址不支持」，
+而是 **`receiver` 必须等于注册地址**。官方文档写的是「**should be** the
+user's registered address」—— 措辞是建议，实际是强制，别照字面推断。
+
+所以 ② 的回程**一定**要过 AgentID 那一跳，钱**一定**会落进那个没标签的池子。
+这正是合约按票记账（`parked`）必需的原因，不是我们设计上的冗余。
+
+`--to` 这个参数留着（命令里有），但只对将来 Aster 放开才有用。
 
 ### builder 管道已打通（2026-11-24 实测，不是推演）
 
@@ -571,6 +625,33 @@ settle --round → approve → sweep + tick ──→ 合约账户
         块 135481376 出 2.000000 / 块 135481486 进 1.962988"
 ```
 
+### v8 上重跑一遍（2026-11-25，又抓到两个坑）
+
+```
+开票 market=AgentID 1.3 ──→ identity 推 1.2（取用费 0.012）
+     parkedAsset = 1.2   ← ③ 确实进 parked，和 ⑤ 一样
+       ↓
+quote → place-order  买 0.978723 @0.4694 → 2.0851 股
+       ↓  卖 2.08 股 @0.54 → 1.10399
+AgentID 1.325340     ← 赚 0.125
+settle → approve → releaseAndSweep ──→ 账户，parkedAsset 归 0
+```
+
+❗ **坑一：窗口关了还能下单，但永远不成交。**
+`BTC Up or Down 5m` 那种短窗口市场，`status` 一直挂 `REGISTERED`，
+报价照给、`place-order` 照返回 orderId，**但撮合已经停了**。
+表现是「下单成功、钱不动、`position` 是 null」。
+**下单前必须自己算 `endTime` 还剩多少**，别信 status。
+
+❗ **坑二：全仓卖出会 `TRADE_INSUFFICIENT_POSITION`。**
+`currentShares` 是浮点（2.0851063829787235），原样填进 `--amount` 就差那么一点。
+**卖的时候留点零头**（我们填 2.08 过了）。
+
+```yaml
+参数:  "quote 和 place-order 都要 --slippageBps，place-order 用 quote 返回的那个值"
+amount: "BUY 时是 USDT，**SELL 时是股数**"
+```
+
 ### 三个必须知道的
 
 ```yaml
@@ -646,7 +727,9 @@ key:    "~/.fons/gpu/predict-api.key，0600，不进 git"
 4. 主人说做完了,跑 `settle --round <id>`。
 5. `sweep` 把回来的东西拉进账户。
 
-**第 3 步开着的那段时间,钱在 AgentID 钱包上,票的额度保护不到它。** 这就是为什么同一时刻只跑一轮身份类 —— 脚本会拦住。如实对主人这么说,**不要把排队说成是为了性能**。
+**第 3 步开着的那段时间,钱在 AgentID 钱包上,票的额度保护不到它。** 如实对主人这么说。
+
+❗ 2026-11-25 之前这里写的是「同一时刻只跑一轮身份类,脚本会拦住」。那道闸已经拆了 —— 它挡住的是**同一笔 mint 的补仓**(价格涨了要加钱,第二笔发不出去)。现在合约按票记账(`parked`),**多轮可以同时在外面**,谁也不挡谁。
 
 状态原话:**「排队中 · 等你在 agent 对话框确认」**。绝不写「并行」。
 
@@ -658,13 +741,189 @@ key:    "~/.fons/gpu/predict-api.key，0600，不进 git"
 ```
 **承诺第 3 条之前,先确认那东西到底转不转得出去。** 有些 mint 出来的代币根本不能转。先用 `eth_call` 模拟一次转账;**转不了就先告诉主人这一个走不了第 3 条**,而不是扫了一遍才发现。
 
+
+### ⑤ 回来的币怎么变现 —— 常驻卖出票
+
+③ 回来的是 USDT，直接就能用。**⑤ 回来的是项目方的币，要卖掉。**
+
+```
+gpu.mjs sell --asset <币地址> --data <swap calldata>
+```
+
+不用每次找主人签一张票 —— **一张常驻卖出票就够了**。
+
+```yaml
+票面:   "1 wei。**不是笔误。**"
+market: "要卖去哪 —— 比如 Pancake V2 Router"
+期限:   "长一点，默认 90 天"
+```
+
+**为什么 1 wei 就够：**
+
+```
+sellInto   只看 netOut 往下减，**从头到尾不看 amount**
+           → 1 wei 的票能卖 100 万个币
+spend      要吃 amount
+           → 1 wei 买不了任何东西
+```
+
+所以这张票可以长期挂着，**agentKey 被偷也拿不走钱** —— 它在这张票上最多净流出 1 wei。
+
+❗ **别把它改大。** 改大不会让卖得更顺，只会让这张长期挂着的票能在那个市场花钱。
+
+### 卖出要注意的两件
+
+```
+带转账税的币   必须用 swapExactTokensForTokensSupportingFeeOnTransferTokens
+                普通的那个会因为实收少于预期而 revert（IGNIS 2% 税实测过）
+收款地址     填账户自己，不是 AgentID
+```
+
 ## 回扫
 
 `sweep` 是**拉**(`transferFrom`),**从不让 AgentID 钱包推**。推一笔就要烧掉那个钱包唯一那条 nonce 队列里的一个位子,而那正是第五类里最稀缺的东西。
 
-所以它依赖开户第 4 步那次一次性授权。**授权没有或者不够,`sweep` 会返回 0 但不报错** —— 先查 allowance,告诉主人要授权什么,**不要报一个其实没挪动任何东西的回扫**。
+所以它依赖 AgentID 的授权。**按轮授,不是一劳永逸**（2026-11-24 改,原来授 MaxUint256,撞「不得索取无限额授权」红线）—— 所以**每一轮都要先跑 `approve`**。
+**授权没有或者不够,`sweep` 会返回 0 但不报错** —— 先查 allowance,告诉主人要授权什么,**不要报一个其实没挪动任何东西的回扫**。
 
 AgentID 地址上的**原生 BNB 合约根本拉不回来**。如实说;主人不要求就留在那儿。
+
+
+### ❗ sweep 不会拉走别的轮次占着的钱
+
+**AgentID 上的 USDT 是一个池子，没有标签。** 合约的 `sweep` 拉的是
+`min(余额, 授权额度)` —— **它不知道池子里有几笔**。
+
+会出现这种事：
+
+```
+⑤ 的 2.97 等着 mint
+Aster 提现回来 8.89
+跑一次 sweep → 11.86 全拉走  →  mint 没钱了，**而且 sweep 不报错**
+```
+
+**合约自己记账**（`parked` / `parkedAsset`，2026-11-25 起）：
+
+```
+payout 到 AgentID 时     这张票记一笔「还没结」
+sweep / sweepable 时     该留 = min( 所有票还没结的和, 当前余额 )
+                        能拉 = 余额 − 该留
+releaseAndSweep(票,币,从) 这一轮花完了：解掉它那份，再把能拉的拉回来
+```
+
+❗ **`min` 是关键。** mint 执行后那笔钱变成了项目方的币，USDT 余额自己就降了，
+「该留的」跟着降 —— **不用去猜那一轮走到哪一步**。
+
+❗ **② Aster 的回款不进 `parked`**（它的票 market 是入金口，不是 AgentID），
+所以它那笔**自动就拉得走** —— 不需要特判。
+
+### ❗ 用户把原生 BNB 当 USDT 充进来了 —— 怎么说、怎么办
+
+**大部分用户在链上分不清 BNB 和 WBNB。这件事一定会发生。**
+
+```
+充进来了吗   会 —— 合约有 receive() external payable {}，照收
+能用吗       **不能** —— available() 看不见它，开不出票，spend/payout 动不了它
+我们自动 wrap 吗  **不**
+```
+
+**为什么不自动 wrap**：wrap 要调 `WBNB.deposit()`，那是一笔 UserOp，**要吃票面** ——
+而误充进来的钱没有任何票覆盖它。专门开一张票来 wrap，又得主人签 ——
+那不如直接告诉主人。而且他可能**本来就是想充 gas**，自动 wrap 是替他做决定。
+
+**`status` 会主动报**（2026-11-25 加的）：
+
+```
+⚠️ 账户地址上有 0.01 原生 BNB —— **它不是可用余额**。
+   转成 gas:  addDeposit()      （owner 在网页上，带 value）
+   提回钱包:  withdrawNative()  （owner 在网页上）
+   要拿 BNB 做交易，先 wrap 成 WBNB 再充
+```
+
+**对主人的说法**：不要说「充错了」（他没做错什么，是两个币长得像）。
+如实说「这笔是原生 BNB，账户只认 ERC20，所以它现在只能当 gas 或者提回去；
+要拿它交易，在钱包里换成 WBNB 再充一次」。
+
+❗ **AgentID 钱包上的原生 BNB 不一样** —— 那是它自己发交易的 gas（approve / mint 要用），
+**本来就该留一点**，而且 `sweep` 根本拉不回来（`sweep` 走 `transferFrom`，原生币没有）。
+status 里把它单列出来，就是为了不和上面那笔混。
+
+### ❗ AgentID 的 gas 见底 —— 失败不会告诉你是没钱
+
+③ 的 `approve`、⑤ 的 `mint` 都要 **AgentID 自己发链上交易**。
+它没 BNB 就发不出去，**而且失败发生在 `baw` 那一侧，报错不会说「你没 gas」**。
+
+`status` 低于 **0.0005 BNB** 就警告（2026-11-25 加的）：
+
+```
+⚠️ AgentID 钱包只剩 0.0000274 BNB —— **下次要它签链上交易会失败**。
+   一笔约 0.00005 BNB。给它转一点（0.0005 够发十笔）。
+   ❗ 这笔 gas **回扫拉不回来**，所以别多转。
+```
+
+**阈值是 0.0005 不是更多，因为我们的自动流程够不着这笔钱。**
+一笔 approve 实测约 0.00005，0.0005 够发十笔。
+
+❗ 但要说准：**这笔 BNB 不是锁死的**。`sweep` 拉不回来（`transferFrom` 对原生币
+不存在），可**主人自己能转走** —— `baw wallet send`，或者币安 App 里直接转。
+对主人要这么说：「这笔 gas 我们的回扫够不着，你要取回得自己转一下」，
+**不要说成「取不回来了」**。
+
+### ❗ 仓位开着的时候，parkedAsset 会连带扣住不相干的钱
+
+**这是 `min(parkedAsset, 余额)` 那一步的已知代价，不是 bug。如实告诉主人。**
+
+`sweepable` 只知道「总账还欠多少」，**不知道 AgentID 上这几笔各是谁的**：
+
+```solidity
+keep = min(parkedAsset, 余额)
+sweepable = min(余额 − keep, 授权额度)
+```
+
+③ 实测时就出现过这一幕 —— 买完 Predict、钱变成股票那一刻：
+
+```
+AgentID 余额  0.221277     ← 剩下的 0.978723 成了股票
+parkedAsset   1.2          ← 账面还欠 1.2
+keep = min(1.2, 0.221277) = 0.221277
+sweepable = **0**           ← 一分都扫不动
+```
+
+**会咬人的场景**：仓位开着，同时别的钱到账。
+
+```
+③ 推 1.2 买 Predict（parked 1.2）→ 钱成股票，AgentID 剩 0.22
+② Aster 提现 0.39 到账          → AgentID 余额 0.61
+sweepable = 0.61 − min(1.2, 0.61) = 0
+→ ② 那 0.39 **扫不走**，要等 ③ settle 完
+```
+
+**钱不会丢，只是被扣住；那一轮 `settle` 一跑就自动恢复。**
+对主人要这么说 —— **不要说成「出错了」，也不要说成「正在处理」**。
+
+为什么不做精确：要精确就得让合约知道「③ 这一轮已经花掉多少」，
+而那件事发生在链下（Predict 的撮合），合约看不见。
+唯一的办法是信 agent 自报进度 —— 那个数会变成新的攻击面。
+**选了宁可少扫**：失败方向是「钱还在 AgentID 上等着」，
+不是「钱被拉走了、那一轮没钱花」。
+
+### 反过来，什么情况会扫**多**
+
+要 `parkedAsset` 偏小才会扫多，而它只有一条路会偏小：
+
+```
+payout 没记上      不可能 —— 合约里是同一笔原子操作，记不上就是 payout 本身失败了
+release 提前调了   ← 只有这一条
+```
+
+而 `release` 调的是 **agent 自己那一轮**，提前放掉的是它自己的钱，碰不到别轮。
+**所以「扫走别轮的钱」在合约层面是进不来的。**
+
+旧版靠脚本里一道「同时只放一轮」的闸来做这件事。那道闸挡住过同一轮补仓，
+而且 agent 绕得过、状态存在本机会丢。记账在合约里，这三条都没了。
+
+`approve` 默认只授「能拉的」那部分。授权比它大时 `sweep` 会拒绝，
+并把该跑的 `approve --amount` 写出来。确实要全拉走带 `--force`。
 
 ## 只有主人能做的事 —— 在网页上
 

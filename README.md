@@ -18,8 +18,8 @@ GPU 的本事不是单核更快，是通道多、互不阻塞、各自失败。�
 | | 地址 |
 | --- | --- |
 | EntryPoint | [`0x0000000071727De22E5E9d8BAf0edAc6f37da032`](https://bscscan.com/address/0x0000000071727De22E5E9d8BAf0edAc6f37da032) |
-| 工厂 | [`0x10B6A79B36C7Bb16Aa36E5FCb108Ebe142C832D1`](https://bscscan.com/address/0x10B6A79B36C7Bb16Aa36E5FCb108Ebe142C832D1) |
-| 账户实现 | [`0xec02dE9a29e2e276FdbeA7c61c569Fe14618bD79`](https://bscscan.com/address/0xec02dE9a29e2e276FdbeA7c61c569Fe14618bD79) |
+| 工厂 | [`0xe6906978d1E097d14Bd328E7C9C314d88624a017`](https://bscscan.com/address/0xe6906978d1E097d14Bd328E7C9C314d88624a017) |
+| 账户实现 | [`0x594dd6d1C8b477848cD379FeD6559ddEbA6a39B6`](https://bscscan.com/address/0x594dd6d1C8b477848cD379FeD6559ddEbA6a39B6) |
 | 收费地址 | [`0x978cC152DfeC8064eC7d5097F138679a46bfBde8`](https://bscscan.com/address/0x978cC152DfeC8064eC7d5097F138679a46bfBde8) |
 
 每个账户是一个 EIP-1167 代理，**实现地址焊死在字节码里，不可升级**。
@@ -135,17 +135,19 @@ UserOp 被 bundler 丢掉时那个 seq **没有被消耗**；本地自增就会�
 | `spend` / `execute` | 花票：approve 给票上钉死的 market 并调它 | 票面封死；`requireReturn` 开着时**买到的必须回账户** |
 | `sellInto` | 把持有的币卖回票的计价资产 | market 钉死；**卖出后计价资产必须增加**，否则 revert |
 
-**`agentKey` / `owner` / EntryPoint 都能调（2 个）**
+**`agentKey` / `owner` / EntryPoint 都能调（4 个）**
 
 | 函数 | 做什么 |
 | --- | --- |
 | `reclaim(ids)` | 回收过期票的额度（只减不增，谁调都一样） |
 | `sweep(asset,from)` | 把钱从 AgentID 钱包**拉回账户** —— 方向是往里拉，拉进来就归 `owner` 管 |
+| `release(noteId)` | 这张票这轮完了，解掉它占的「还没结」。**只影响回扫能拉多少，动不了钱** |
+| `releaseAndSweep(noteId,asset,from)` | 上面两件合成一笔 —— 省一条车道、省一次 gas |
 
-**谁都能调（无权限，7 个只读 + 2 个）**
+**谁都能调（无权限，10 个只读 + 2 个）**
 
 `owner()` `agentKey()` `agentIdEoa()` `agentId()` `epoch()` `notes()` `reserved()`
-`available()` `noteIdOf()` 全是只读。另外两个：
+`available()` `noteIdOf()` `parked()` `parkedAsset()` `sweepable()` 全是只读。另外两个：
 
 - `addDeposit()` —— 任何人都能**往里充** gas，没有危害
 - `validateUserOp()` —— **只有 EntryPoint 能调**，而且它只认 `agentKey` 的签名
@@ -280,6 +282,10 @@ agentKey 被拿走  →  最多损失「所有活着的票还没花完的部分�
    `requireReturn` 开着能强制输出回账户，但**管不了价格** —— agent 照样能买垃圾币。
 3. **第五类（身份类）的票是毛流出上限。** 钱转去 AgentID 钱包之后票就管不着了，
    `sweep` 回来**不冲减** `netOut`。所以这类票要按轮开、开小额。
+
+   ❗ 合约记一笔 `parked[noteId]`（2026-11-25 起），回扫时**留住还没结的那部分**，
+   免得这一轮的钱被另一轮的回扫拉走。这是**记账，不是上限** —— 上限始终是票面。
+   `release` 解掉之后那笔就能拉了；不解只是少拉一点，**不会卡住任何轮次**。
 4. **接入码泄漏能被抢注。** 后果是**抢占地址 + 归属被污染**，不是丢钱（那个账户里
    本来就没钱）。换一把 `agentKey` 就换一个地址，照样开得出户。缓解靠 deadline（默认 10 分钟）。
 

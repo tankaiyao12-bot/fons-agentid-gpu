@@ -41,8 +41,8 @@ chain:
   explorer:       "https://bscscan.com"
 contracts:
   entryPoint:     "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
-  factory:        "0x10B6A79B36C7Bb16Aa36E5FCb108Ebe142C832D1"
-  implementation: "0xec02dE9a29e2e276FdbeA7c61c569Fe14618bD79"
+  factory:        "0xe6906978d1E097d14Bd328E7C9C314d88624a017"
+  implementation: "0x594dd6d1C8b477848cD379FeD6559ddEbA6a39B6"
   bundler:        "http://127.0.0.1:4337"
 assets:
   USDT:           "0x55d398326f99059fF775485246999027B3197955"
@@ -59,7 +59,7 @@ The product sorts markets by **who verifies the signature and who sends the tran
 categories:
   1_direct:   {example: Pancake,     who_sends: AgentAccount, money: "never leaves the account", note_market: "the market contract"}
   2_signed:   {example: Aster,       who_sends: AgentAccount, money: "never leaves the account", note_market: "the market contract"}
-  3_custody:  {example: Predict.fun, who_sends: AgentAccount, money: "really sits at the market until it settles", note_market: "the market contract"}
+  3_custody:  {example: Predict.fun, who_sends: "the AgentID wallet itself", money: "sits on the AgentID wallet between the order and settlement", note_market: "the AgentID wallet address"}
   4_feeder:   {example: Renaiss,     who_sends: AgentAccount, money: "we only feed the deposit gate; after that it is not ours", note_market: "the deposit gate"}
   5_identity: {example: "jager-class mints", who_sends: "the AgentID wallet ITSELF", money: "sits on the AgentID wallet until swept back", note_market: "the AgentID wallet address"}
 ```
@@ -145,7 +145,7 @@ scripts:   # run from the module directory
   - {cmd: "node scripts/gpu.mjs decode <code>",                  does: "take an access code apart. **Do NOT look at it with a generic base64 decoder** — it holds raw address and signature bytes, not text; that kind of tool just says 「invalid input」"}
   - {cmd: "node scripts/gpu.mjs classify --market <addr>",       does: "the part of the three-step classification that can be read on chain"}
   - {cmd: "node scripts/gpu.mjs spend --note <id> --data <hex>", does: "queue one round against that note; --dry simulates without sending"}
-  - {cmd: "node scripts/gpu.mjs identity --note <id> --amount <n>", does: "category ⑤: move headroom to the AgentID wallet and take the ⑤ gate"}
+  - {cmd: "node scripts/gpu.mjs identity --note <id> --amount <n>", does: "category ⑤: move headroom to the AgentID wallet. The contract books it per note; it blocks no one"}
   - {cmd: "node scripts/gpu.mjs approve [--asset <addr>] [--amount <n>]",  does: "let the account pull one asset back from the AgentID wallet. **PER ASSET and PER AMOUNT** — by default it approves only what this round needs, **never unlimited** (a hard red line, and unlimited is an illusion anyway: BSC USDT does not special-case MaxUint256). The one at opening only covers USDT; a minted token needs its own. WITHOUT IT sweep returns 0 and does NOT fail"}
   - {cmd: "node scripts/gpu.mjs canpull [--asset <addr>]",        does: "can this asset be pulled back right now? Run it after a mint — do not wait until sweep returns 0 to find out"}
   - {cmd: "node scripts/gpu.mjs rekey",                         does: "check whether the local agent key still matches the one the account accepts. **Run this first when ops stop going out for no visible reason** — if the owner rotated the key, the old one signs UserOps the contract rejects as invalid, and the bundler refuses them without saying why"}
@@ -178,7 +178,7 @@ spend_note:
     - "slippage / minimum received: IF the owner did not say THEN ask. NEVER pick a number that merely looks reasonable"
 identity_mint:
   must_ask: [project, amount]
-  platform: [AgentID wallet address, note, "position in the ⑤ queue"]
+  platform: [AgentID wallet address, note]
   never_infer:
     - "the mint contract: only from the project page the owner gave you or what the owner said. NEVER go looking for it"
     - "selling what comes back: IF the owner did not say sell THEN do not sell"
@@ -186,7 +186,7 @@ identity_mint:
 sweep:
   must_ask: []
   safe_default: {asset: "the asset of the note that round spent"}
-  platform: ["how much is on the AgentID wallet", "whether the one-time approval covers it"]
+  platform: ["how much is on the AgentID wallet", "whether this round's allowance covers it (granted per round, not once and for all)"]
   never_infer:
     - "BNB sitting on the AgentID wallet cannot be swept by the contract (sweep pulls ERC-20). Say so; do not have the AgentID wallet push it unless the owner asks"
 ```
@@ -270,7 +270,12 @@ how_money_goes_in: "spend → depositFor(currency, account, amount, broker)"
   # msg.sender pays (our account); the `account` parameter is credited (the EOA).
   # Verified by on-chain trace: the two are independent, and **the EOA never sends a transaction**.
 who_places_orders: "an API wallet the EOA approved (can be our agentKey), over Aster's REST API"
-how_money_comes_out: "**only through the web UI at asterdex.com**. There is no on-chain withdraw —
+how_money_comes_out: "REST: POST /fapi/v3/aster/user-withdraw (the `aster-withdraw` command, real money 11-24).
+                      ❗ `receiver` MUST equal the registered address — proven 2026-11-25 by three
+                      controls: the contract account and a plain EOA both got -1000 'This address is
+                      currently not supported'; only the AgentID went through. The docs say
+                      'should be', but it is enforced. So ② always comes back via the AgentID.
+                      There is no on-chain withdraw —
   the deposit bridge is one-way (probed every withdraw variant; none exist)."
 ```
 
@@ -665,7 +670,9 @@ This is the one place where the iron rule bends, so it gets its own rules.
 4. `settle --round <id>` once the owner says it is done.
 5. `sweep` pulls what came back into the account.
 
-**While step 3 is open, the money is on the AgentID wallet and the note's cap does not protect it.** That is why only one identity round runs at a time — the scripts enforce it. Say it to the owner honestly; do not present the queue as a performance choice.
+**While step 3 is open, the money is on the AgentID wallet and the note's cap does not protect it.** Say that to the owner honestly.
+
+❗ Before 2026-11-25 this said "only one identity round runs at a time — the scripts enforce it". That gate is gone: what it blocked was **a top-up of the same mint** (the price moved, the second payout could not go out). The contract now books each note separately (`parked`), so **several rounds can be outstanding at once** and none blocks another.
 
 Status, verbatim: 「排队中 · 等你在 agent 对话框确认」. Never 「并行」.
 
@@ -677,6 +684,47 @@ Status, verbatim: 「排队中 · 等你在 agent 对话框确认」. Never 「�
 ```
 **Before promising route 3, check the thing can actually be transferred at all.** Some minted tokens cannot. Simulate a transfer with `eth_call` first; IF it fails THEN tell the owner route 3 is not available for this one, rather than sweeping and finding out.
 
+
+### Cashing out what ⑤ brings back: the resident sell note
+
+③ returns USDT, which is usable as is. **⑤ returns the project's own token, which has to be sold.**
+
+```
+gpu.mjs sell --asset <token> --data <swap calldata>
+```
+
+You do not need a fresh note from the owner each time — **one resident sell note covers all of them**.
+
+```yaml
+face:    "1 wei. **Not a typo.**"
+market:  "where to sell — the Pancake V2 Router, say"
+expiry:  "generous; 90 days by default"
+```
+
+**Why 1 wei is enough:**
+
+```
+sellInto   only ever lowers netOut and **never reads amount**
+           → a 1-wei note can sell a million tokens
+spend      consumes amount
+           → a 1-wei note cannot buy anything
+```
+
+So this note can hang around indefinitely and **a stolen agentKey still gets nothing** —
+on this note it can move at most 1 wei net.
+
+❗ **Do not make it bigger.** A larger face does not help selling; it only lets this
+long-lived note spend money on that market.
+
+### Two things to get right when selling
+
+```
+tokens with a transfer tax   use swapExactTokensForTokensSupportingFeeOnTransferTokens;
+                             the plain one reverts because less arrives than quoted
+                             (measured on IGNIS, 2% tax)
+recipient                    the account itself, not the AgentID
+```
+
 ## Sweeping
 
 `sweep` **pulls** with `transferFrom` — it never asks the AgentID wallet to push. Pushing would burn a slot in that wallet's single nonce queue, which is the scarce thing in ⑤.
@@ -684,6 +732,140 @@ Status, verbatim: 「排队中 · 等你在 agent 对话框确认」. Never 「�
 It therefore needs an approval for **that exact asset** (step 4 of opening only covers USDT). IF the approval is missing or too small, `sweep` returns 0 **without failing** — check the allowance first and tell the owner what to approve, rather than reporting a sweep that moved nothing.
 
 Native BNB on the AgentID wallet cannot be pulled by the contract at all. Say so; leave it unless the owner asks.
+
+
+### ❗ sweep will not take money another round is holding
+
+**The USDT at the AgentID is one pool with no labels.** The contract's `sweep` pulls
+`min(balance, allowance)` — **it has no idea how many rounds are in that pool**.
+
+So this happens:
+
+```
+⑤'s 2.97 is waiting for a mint
+Aster withdraws 8.89 into the same address
+one sweep → all 11.86 leaves  →  the mint has no funds, **and sweep reports success**
+```
+
+**The contract books it itself** (`parked` / `parkedAsset`, since 2026-11-25):
+
+```
+on payout to the AgentID    that note records what is still unsettled
+on sweep / sweepable        held = min( sum of every note's unsettled, current balance )
+                            free = balance − held
+releaseAndSweep(note,asset,from)   this round is done: clear its share, then pull what is free
+```
+
+❗ **The `min` is the point.** Once the mint runs, that money becomes the project's token
+and the USDT balance drops on its own, so `held` drops with it — **no need to guess which
+step the round is on**.
+
+❗ **② Aster's return is not in `parked`** (its note's market is the deposit gate, not the
+AgentID), so that money **is pullable on its own** — no special case needed.
+
+### ❗ The owner sent native BNB instead of USDT — what to say, what to do
+
+**Most users cannot tell BNB from WBNB on-chain. This will happen.**
+
+```
+does it arrive   yes — the contract has receive() external payable {}
+is it usable     **no** — available() cannot see it, no note can be denominated in it
+do we auto-wrap  **no**
+```
+
+**Why no auto-wrap**: wrapping calls `WBNB.deposit()`, which is a UserOp and
+**eats note headroom** — and money that arrived by accident is covered by no note.
+Issuing a note just to wrap needs the owner's signature anyway, so telling the owner
+is simpler. And they may have **meant** to top up gas; auto-wrapping decides for them.
+
+**`status` says so on its own** (added 2026-11-25): it prints the amount, says it is
+not spendable balance, and gives the two ways out — `addDeposit()` to turn it into
+gas, `withdrawNative()` to take it back — plus "wrap to WBNB first" for trading.
+
+**How to say it to the owner**: do not say they "did it wrong" — the two coins look
+alike. Say plainly: this is native BNB, the account only understands ERC-20, so right
+now it can only pay gas or go back; to trade with it, wrap it to WBNB and send again.
+
+❗ **Native BNB at the AgentID is a different thing** — that is its own gas (it needs
+some to send `approve` / `mint`), it **should** stay there, and `sweep` cannot pull it
+anyway (`sweep` uses `transferFrom`, which native coins do not have). `status` lists it
+separately so the two never get confused.
+
+### ❗ The AgentID running out of gas — the failure will not say so
+
+③'s `approve` and ⑤'s `mint` both need **the AgentID to send its own on-chain
+transaction**. With no BNB it cannot, and **the failure happens on `baw`'s side, where
+the error will not say "you are out of gas"**.
+
+`status` warns below **0.0005 BNB** (added 2026-11-25): it prints what is left, says the
+next signature will fail, and asks for a top-up — about 0.00005 per `approve`, so
+0.0005 covers ten.
+
+**The threshold is 0.0005 and not more because our automation cannot reach this gas.**
+About 0.00005 per `approve`, so 0.0005 covers ten.
+
+❗ Be precise about it: **this BNB is not locked**. `sweep` cannot pull it (`transferFrom`
+does not exist for native coins), but **the owner can move it themselves** — `baw wallet
+send`, or straight from the Binance app. Tell the owner "our sweep cannot reach this gas,
+you would move it yourself", **not "it cannot be recovered"**.
+
+### ❗ While a position is open, parkedAsset also holds down unrelated money
+
+**This is the known cost of the `min(parkedAsset, balance)` step, not a bug. Say so plainly.**
+
+`sweepable` only knows *how much is still owed in total*. It does **not** know which
+of the coins sitting at the AgentID belong to which round:
+
+```solidity
+keep = min(parkedAsset, balance)
+sweepable = min(balance - keep, allowance)
+```
+
+Seen live during the ③ test, the moment the money turned into shares:
+
+```
+AgentID balance  0.221277     <- the other 0.978723 is now shares
+parkedAsset      1.2          <- the books still owe 1.2
+keep = min(1.2, 0.221277) = 0.221277
+sweepable = **0**              <- nothing can be pulled
+```
+
+**The case that bites**: a position is open and other money lands at the same time.
+
+```
+③ pays out 1.2 into Predict (parked 1.2) -> becomes shares, 0.22 left at the AgentID
+② Aster withdrawal of 0.39 arrives       -> AgentID balance 0.61
+sweepable = 0.61 - min(1.2, 0.61) = 0
+-> ②'s 0.39 **cannot be pulled** until ③ settles
+```
+
+**No money is lost — it is only held. It frees itself as soon as that round settles.**
+Tell the owner exactly that: **not "something went wrong", and not "it is processing".**
+
+Why not make it exact: that would need the contract to know how much round ③ has
+already spent, and that happens off-chain (inside Predict's matching). The only way
+in is to trust a number the agent reports — which becomes a new attack surface.
+**We chose to under-sweep**: the failure direction is "the money is still waiting at
+the AgentID", not "the money was pulled and that round can no longer pay".
+
+### The other direction — when could it over-sweep
+
+Over-sweeping needs `parkedAsset` to be too low, and only one path makes it too low:
+
+```
+payout not recorded   impossible — same atomic call; if it did not record, payout itself reverted
+release called early  <- the only one
+```
+
+And `release` acts on **the agent's own round**: what it frees early is its own money.
+**So "sweeping another round's money" cannot get in at the contract level.**
+
+The old design did this with a scripts-side gate that kept one round outstanding. That gate
+blocked same-round top-ups, an agent could go around it, and its state lived on the user's
+machine where it could be lost. Booking it in the contract removes all three.
+
+`approve` grants only `free` by default. When the allowance exceeds it, `sweep` refuses and
+prints the `approve --amount` to run. Pass `--force` to take everything anyway.
 
 ## What only the owner can do — on the web page
 

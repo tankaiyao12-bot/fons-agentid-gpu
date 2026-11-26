@@ -605,16 +605,174 @@ contract AgentAccountTest is Test {
         acc.payout(id, 400e18);
         assertEq(acc.available(address(usdt)), 100e18);
         assertEq(acc.reserved(0, address(usdt)), 0, unicode"票花光了，承诺也就清了");
+        assertEq(acc.parked(id), 400e18, unicode"钱停在 AgentID 上，记这张票头上");
 
-        // AgentID 那边 mint 完剩回来 250（开户时做过一次性授权）
+        vm.prank(agentIdEoa);
+        usdt.approve(address(acc), type(uint256).max);
+
+        // 这一轮还没说完事，所以回扫**一分都不拉** —— 那 400 它还要用。
+        vm.prank(agentKey);
+        assertEq(acc.sweep(address(usdt), agentIdEoa), 0, unicode"没 release 就不该拉走它还要用的钱");
+
+        vm.prank(agentKey);
+        assertEq(acc.release(id), 400e18);
+        assertEq(acc.parked(id), 0);
+
+        vm.prank(agentKey);
+        uint256 got = acc.sweep(address(usdt), agentIdEoa);
+        assertEq(got, 400e18, unicode"说完事了，这里没真去 mint，所以 400 原样回来");
+        assertEq(usdt.balanceOf(address(acc)), 500e18);
+        assertEq(acc.available(address(usdt)), 500e18, unicode"钱回来就重新可用");
+    }
+
+    /// 回归锁 · 2026-11-25 真实撞到过：
+    /// 旧版靠用户脚本里「同时只放一轮」的闸，结果**同一轮补仓**被自己挡住了 ——
+    /// r9 推了 2.97 占着闸，价格涨了要补的 r10 发不出去，只能手工 settle --sweep false 绕。
+    /// 改成按票记账之后，两轮各记各的，谁也不挡谁。
+    function test_two_identity_rounds_run_in_parallel() public {
+        bytes32 r9 = _issue("r9", agentIdEoa, 300e18);
+        bytes32 r10 = _issue("r10", agentIdEoa, 200e18);
+
+        vm.prank(agentKey);
+        acc.payout(r9, 300e18);
+
+        // 关键：第二轮**不需要等第一轮结束**。
+        vm.prank(agentKey);
+        acc.payout(r10, 200e18);
+
+        assertEq(acc.parked(r9), 300e18);
+        assertEq(acc.parked(r10), 200e18);
+        assertEq(acc.parkedAsset(address(usdt)), 500e18, unicode"两轮各记各的，汇总 500");
+
         vm.prank(agentIdEoa);
         usdt.approve(address(acc), type(uint256).max);
 
         vm.prank(agentKey);
-        uint256 got = acc.sweep(address(usdt), agentIdEoa);
-        assertEq(got, 400e18, unicode"这里没真去 mint，所以 400 原样回来");
-        assertEq(usdt.balanceOf(address(acc)), 500e18);
-        assertEq(acc.available(address(usdt)), 500e18, unicode"钱回来就重新可用");
+        assertEq(acc.sweep(address(usdt), agentIdEoa), 0, unicode"两轮的钱都还要用，一分不拉");
+
+        // r9 花完了说一声，只解它那一份。
+        vm.prank(agentKey);
+        acc.release(r9);
+        assertEq(acc.parkedAsset(address(usdt)), 200e18, unicode"只解 r9，r10 的 200 还留着");
+
+        vm.prank(agentKey);
+        assertEq(acc.sweep(address(usdt), agentIdEoa), 300e18, unicode"拉回 r9 那份，r10 的留在原地");
+        assertEq(usdt.balanceOf(agentIdEoa), 200e18);
+    }
+
+    /// ② Aster 的提现落在同一个 AgentID 钱包上，但它的票 market 是入金口、不是 AgentID，
+    /// 所以不进 parked —— 它那笔钱该拉多少拉多少，不该被 ⑤ 占着的部分挡住。
+    /// 这就是回扫撞车那个洞：旧版 sweep 不分青红皂白「有多少拉多少」。
+    function test_sweep_pulls_unparked_money_but_keeps_parked() public {
+        bytes32 id = _issue("a", agentIdEoa, 300e18);
+
+        vm.prank(agentKey);
+        acc.payout(id, 300e18);
+
+        // Aster 把 170 提现回 AgentID —— 和 parked 无关的钱。
+        usdt.mint(agentIdEoa, 170e18);
+
+        vm.prank(agentIdEoa);
+        usdt.approve(address(acc), type(uint256).max);
+
+        vm.prank(agentKey);
+        assertEq(acc.sweep(address(usdt), agentIdEoa), 170e18, unicode"Aster 的 170 拉得走");
+        assertEq(usdt.balanceOf(agentIdEoa), 300e18, unicode"⑤ 还要用的 300 原地不动");
+    }
+
+    /// `min(账面, 余额)` 里的 min 不是保险，是必须的：
+    /// mint 会把钱真的花掉，那时候余额比账面少，按账面硬扣会下溢。
+    function test_parked_capped_by_actual_balance_after_spending() public {
+        bytes32 id = _issue("a", agentIdEoa, 300e18);
+
+        vm.prank(agentKey);
+        acc.payout(id, 300e18);
+
+        // AgentID 真去 mint 了，花掉 280，只剩 20。
+        vm.prank(agentIdEoa);
+        usdt.transfer(address(0xdead), 280e18);
+
+        vm.prank(agentIdEoa);
+        usdt.approve(address(acc), type(uint256).max);
+
+        vm.prank(agentKey);
+        assertEq(acc.sweepable(address(usdt), agentIdEoa), 0, unicode"账面 300 > 余额 20，留全部、不下溢");
+
+        vm.prank(agentKey);
+        acc.release(id);
+
+        vm.prank(agentKey);
+        assertEq(acc.sweep(address(usdt), agentIdEoa), 20e18, unicode"解了之后把剩的 20 拉回来");
+    }
+
+    /// ①② 的票 market 填的是市场合约，钱根本不经过 AgentID —— 不该记 parked。
+    function test_direct_market_note_never_parks() public {
+        bytes32 id = _issue("a", address(market), 300e18);
+
+        vm.prank(agentKey);
+        acc.payout(id, 300e18);
+
+        assertEq(acc.parked(id), 0, unicode"钱去的是市场合约，不停在 AgentID 上");
+        assertEq(acc.parkedAsset(address(usdt)), 0);
+    }
+
+    /// agent 失联时主人得能自己解 —— onlyOperator 含 owner。
+    function test_owner_can_release_when_agent_is_gone() public {
+        bytes32 id = _issue("a", agentIdEoa, 300e18);
+
+        vm.prank(agentKey);
+        acc.payout(id, 300e18);
+
+        vm.prank(owner);
+        assertEq(acc.release(id), 300e18, unicode"主人自己能解，不至于永远卡住");
+        assertEq(acc.parkedAsset(address(usdt)), 0);
+    }
+
+    /// 回扫那一笔要一次做完「解账 + 拉回」—— 拆两笔要两条车道、两次 gas。
+    function test_releaseAndSweep_does_both_in_one_call() public {
+        bytes32 id = _issue("a", agentIdEoa, 300e18);
+
+        vm.prank(agentKey);
+        acc.payout(id, 300e18);
+
+        vm.prank(agentIdEoa);
+        usdt.approve(address(acc), type(uint256).max);
+
+        vm.prank(agentKey);
+        uint256 got = acc.releaseAndSweep(id, address(usdt), agentIdEoa);
+        assertEq(got, 300e18, unicode"一笔就把自己推出去的钱拉回来了");
+        assertEq(acc.parked(id), 0);
+        assertEq(acc.parkedAsset(address(usdt)), 0);
+        assertEq(usdt.balanceOf(agentIdEoa), 0);
+    }
+
+    /// 只解自己那份 —— 别的轮次占着的照样留在原地。
+    function test_releaseAndSweep_leaves_other_rounds_alone() public {
+        bytes32 r9 = _issue("r9", agentIdEoa, 300e18);
+        bytes32 r10 = _issue("r10", agentIdEoa, 200e18);
+
+        vm.startPrank(agentKey);
+        acc.payout(r9, 300e18);
+        acc.payout(r10, 200e18);
+        vm.stopPrank();
+
+        vm.prank(agentIdEoa);
+        usdt.approve(address(acc), type(uint256).max);
+
+        vm.prank(agentKey);
+        assertEq(acc.releaseAndSweep(r9, address(usdt), agentIdEoa), 300e18);
+        assertEq(usdt.balanceOf(agentIdEoa), 200e18, unicode"r10 的 200 一分没动");
+        assertEq(acc.parked(r10), 200e18);
+    }
+
+    function test_release_is_not_public() public {
+        bytes32 id = _issue("a", agentIdEoa, 300e18);
+        vm.prank(agentKey);
+        acc.payout(id, 300e18);
+
+        vm.prank(address(0xbad));
+        vm.expectRevert(AgentAccount.NotOperator.selector);
+        acc.release(id);
     }
 
     // ──────── execute：调度器发的每一笔 UserOp 都走这里，是整条车道的落点 ────────
